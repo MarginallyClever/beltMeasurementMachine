@@ -17,6 +17,7 @@
 #define STEPS_PER_TURN       (NORMAL_MOTOR_STEPS * MICROSTEPS)  // default number of steps per turn * microsteps
 #define PULLEY_PITCH         (2*20.0) // 2mm per tooth, 20 teeth.
 #define MM_PER_STEP          (PULLEY_PITCH/STEPS_PER_TURN)
+#define STEPS_PER_MM         (STEPS_PER_TURN/PULLEY_PITCH)
 
 
 // Smart controller settings
@@ -64,6 +65,8 @@ long lcd_update;
 
 // belt
 int millimeters;
+long soFar;
+boolean goOut;
 
 //-----------------------------------------------------------
 
@@ -97,19 +100,21 @@ void setup() {
 
 void setup_belts() {
   millimeters=10;
+  soFar=0;
 }
 
 void setup_menu() {
   menu_pos=4;
   menu_active=false;
   lcd_update=0;
+  goOut=true;
 }
 
 void change_mm(int scale) {
   if(lcd_turn == 0) return;
   
   int adjust = millimeters + scale * lcd_turn;
-  if(adjust<10000 && adjust>=0) {
+  if(adjust<=50000 && adjust>0) {
     millimeters = adjust;
   }
 }
@@ -120,10 +125,15 @@ void loop() {
   
   if(!menu_active) {
     // move between menus
-    menu_pos = (menu_pos + lcd_turn + 5) % 5;
+    menu_pos = (menu_pos + lcd_turn + 6) % 6;
     // enter position
     if(lcd_click_now) {
       menu_active=true;
+      if(menu_pos==4) {
+        // in our out
+        goOut = !goOut;
+        menu_active=false;
+      }
     }
   } else {
     // change / activate menu
@@ -132,7 +142,8 @@ void loop() {
       case 1:  change_mm( 100);  break;
       case 2:  change_mm(  10);  break;
       case 3:  change_mm(   1);  break;
-      case 4:  countOutNow();  menu_active=false;  break;
+      case 4:  menu_active=false;  break;
+      case 5:  countOutNow();  menu_active=false;  break;
     }
   
     // exit menu
@@ -151,7 +162,8 @@ void loop() {
     case 1: lcd.setCursor(2,0);  break;
     case 2: lcd.setCursor(3,0);  break;
     case 3: lcd.setCursor(4,0);  break;
-    case 4: lcd.setCursor(6,0);  break;
+    case 4: lcd.setCursor(8,0);  break;
+    case 5: lcd.setCursor(12,0);  break;
   }
   // blink cursor
   if(millis() % 600 < 300) {
@@ -175,8 +187,13 @@ void lcd_draw() {
   lcd.print((millimeters % 1000) /   100);
   lcd.print((millimeters %  100) /    10);
   lcd.print((millimeters %   10)        );
-  lcd.print(" ");
+  lcd.print("mm ");
+  lcd.print(goOut?"OUT ":"IN  ");
   lcd.print("GO");
+  
+  lcd.setCursor(0,1);
+  lcd.print(soFar * MM_PER_STEP);
+  lcd.print("mm so far");
 
   char c = (menu_active?'*':'_');
   Serial.print((millimeters       ) / 10000);
@@ -184,20 +201,25 @@ void lcd_draw() {
   Serial.print((millimeters % 1000) /   100);  if(menu_pos==1) Serial.print(c);
   Serial.print((millimeters %  100) /    10);  if(menu_pos==2) Serial.print(c);
   Serial.print((millimeters %   10)        );  if(menu_pos==3) Serial.print(c);
-  Serial.print(                       " GO");  if(menu_pos==4) Serial.print(c);
+  Serial.print(goOut?"OUT ":"IN  ");           if(menu_pos==4) Serial.print(c);
+  Serial.print(                       " GO");  if(menu_pos==5) Serial.print(c);
 
   Serial.print("\n");
 }
 
 void countOutNow() {
-  Serial.print("Counting out ");
+  Serial.print("Counting ");
+  Serial.print(goOut?"out ":"in ");
   Serial.print(millimeters);
   Serial.println("mm of belt");
 
   Serial.print(MM_PER_STEP);
   Serial.println(" mm/steps");
   
-  long stepsRemaining = (float)millimeters / MM_PER_STEP;
+  long stepsRemaining = (float)millimeters * STEPS_PER_MM;
+
+  digitalWrite(DIR_PIN,goOut?LOW:HIGH);
+  int add = goOut?1:-1;
   
   Serial.print(stepsRemaining);
   Serial.println(" steps");
@@ -205,8 +227,12 @@ void countOutNow() {
   while(stepsRemaining>0) {
     digitalWrite(STEP_PIN,HIGH);
     digitalWrite(STEP_PIN,LOW);
-    delayMicroseconds(250);
+    delayMicroseconds(150);
+    if((stepsRemaining%(int)STEPS_PER_MM)==0) {
+      lcd_draw();
+    }
     stepsRemaining--;
+    soFar+=add;
   }
   Serial.println("Done.");
 }
