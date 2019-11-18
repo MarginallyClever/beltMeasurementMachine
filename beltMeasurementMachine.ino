@@ -19,6 +19,7 @@
 #define MM_PER_STEP          (PULLEY_PITCH/STEPS_PER_TURN)
 #define STEPS_PER_MM         (STEPS_PER_TURN/PULLEY_PITCH)
 
+#define DEFAULT_MM_TO_PUSH 1000
 
 // Smart controller settings
 #define BEEPER             44
@@ -99,7 +100,7 @@ void setup() {
 }
 
 void setup_belts() {
-  millimeters=10;
+  millimeters=DEFAULT_MM_TO_PUSH;
   soFar=0;
 }
 
