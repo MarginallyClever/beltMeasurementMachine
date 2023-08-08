@@ -1,21 +1,30 @@
 #pragma once
-
-
-//----------------------------
-// Mutually exclusive features - With STM32F103FC8T6 you can have USB serial or CANBus but not both.
-// If you try to use both then neither will work.
+//-----------------------------------------------------------------------------
 
 // define this to use USB serial.
 #define BUILD_SERIAL
 // define this to use CANBus.
-//#define BUILD_CANBUS
+#define BUILD_CANBUS
 
-#if defined(BUILD_SERIAL) && defined(BUILD_CANBUS)
-#error define BUILD_SERIAL or BUILD_CANBUS.  Not both at once!
+// define this value to report sensor readings over serial (if BUILD_SERIAL is enabled)
+//#define DEBUG_SENSOR
+
+// define this value to report stepper calculations over serial (if BUILD_SERIAL is enabled)
+//#define DEBUG_STEPPING
+
+// uncomment to turn on serial debugging
+//#define DEBUG_CAN
+// uncomment to report CAN send fails over serial.
+//#define CAN_REPORT_FAIL
+
+
+#ifdef BUILD_CANBUS
+  //#define CAN_SPEED       CAN_1000KBPS
+  #define CAN_SPEED       CAN_500KBPS
+  //#define CAN_SPEED       CAN_100KBPS
 #endif
-#if !defined(BUILD_SERIAL) && !defined(BUILD_CANBUS)
-#error define BUILD_SERIAL or BUILD_CANBUS.  At least one!
-#endif
+
+//-----------------------------------------------------------------------------
 
 #ifdef BUILD_SERIAL
   #define DEBUG(x)        Serial.print(x)
@@ -28,12 +37,6 @@
   #define DEBUGLN(x)      NOP
 #endif
 
-#ifdef BUILD_CANBUS
-  //#define CAN_SPEED       CAN_1000KBPS
-  #define CAN_SPEED       CAN_500KBPS
-  //#define CAN_SPEED       CAN_100KBPS
-#endif
-
 #include "pins.h"
 #include "serial.h"
 #include "CANBus.h"
@@ -41,3 +44,5 @@
 #include "sensor.h"
 #include "motor.h"
 #include "led.h"
+#include "CANOpen.h"
+#include "application.h"

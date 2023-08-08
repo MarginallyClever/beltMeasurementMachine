@@ -1,21 +1,22 @@
 #pragma once
 //-----------------------------------------------------------------------------
 // CAN bus for Daisy Driver
-// from https://github.com/nopnop2002/Arduino-STM32-CAN/tree/master/stm32f103
+// from https://github.com/nopnop2002/Arduino-STM32-CAN/blob/master/stm32f407/stm32f407.ino
 //-----------------------------------------------------------------------------
 
-//#define CAN_DEBUG  // uncomment to turn on serial debugging
+// stm32f405 has two channels.  Valid values are 1 or 2
+// Channel 1 is pins PB8/PB9, so that's the only good setting for this board.
+#define CAN_ACTIVE_CHANNEL 1  
 
-// Symbolic names for bit rate of CAN message
+//-----------------------------------------------------------------------------
+
+/* Symbolic names for bit rate of CAN message                                */
 typedef enum {CAN_50KBPS, CAN_100KBPS, CAN_125KBPS, CAN_250KBPS, CAN_500KBPS, CAN_1000KBPS} BITRATE;
 
-// Real speed for bit rate of CAN message
-uint32_t SPEED[6] = {50*1000, 100*1000, 125*1000, 250*1000, 500*1000, 1000*1000};
-
-// Symbolic names for formats of CAN message
+/* Symbolic names for formats of CAN message                                 */
 typedef enum {STANDARD_FORMAT = 0, EXTENDED_FORMAT} CAN_FORMAT;
 
-// Symbolic names for type of CAN message
+/* Symbolic names for type of CAN message                                    */
 typedef enum {DATA_FRAME = 0, REMOTE_FRAME}         CAN_FRAME;
 
 //-----------------------------------------------------------------------------
@@ -37,93 +38,169 @@ typedef enum {DATA_FRAME = 0, REMOTE_FRAME}         CAN_FRAME;
 //-----------------------------------------------------------------------------
 
 typedef struct {
-  uint32_t id;        // 29 bit identifier
-  uint8_t  data[8];   // Data field
-  uint8_t  len;       // Length of data field in bytes
-  uint8_t  ch;        // Object channel(Not use)
-  uint8_t  format;    // 0 - STANDARD, 1- EXTENDED IDENTIFIER
-  uint8_t  type;      // 0 - DATA FRAME, 1 - REMOTE FRAME
+  uint32_t id;        /* 29 bit identifier                               */
+  uint8_t  data[8];   /* Data field                                      */
+  uint8_t  len;       /* Length of data field in bytes                   */
+  uint8_t  ch;        /* Object channel(Not use)                         */
+  uint8_t  format;    /* 0 - STANDARD, 1- EXTENDED IDENTIFIER            */
+  uint8_t  type;      /* 0 - DATA FRAME, 1 - REMOTE FRAME                */
 } CAN_msg_t;
 
-typedef struct {
-    uint16_t baud_rate_prescaler;                /// [1 to 1024]
-    uint8_t time_segment_1;                      /// [1 to 16]
-    uint8_t time_segment_2;                      /// [1 to 8]
-    uint8_t resynchronization_jump_width;        /// [1 to 4] (recommended value is 1)
+typedef const struct {
+  uint8_t TS2;
+  uint8_t TS1;
+  uint8_t BRP;
 } CAN_bit_timing_config_t;
 
 //-----------------------------------------------------------------------------
+// macros for working with CAN_msg_t
 
-extern uint8_t CANBusAddress;
+#define CAN_START(canMsg)        {  \
+  canMsg.format = STANDARD_FORMAT;  \
+  canMsg.type = DATA_FRAME;         \
+  canMsg.len=0;                     }
+
+#define CAN_ADD_SHORT(canMsg,v)  {  canMsg.data[canMsg.len++] = ((v)&0xFF);  }
+
+#define CAN_ADD_LONG(canMsg,v)   {  \
+  CAN_ADD_SHORT(canMsg,((v>>8)&0xFF));  \
+  CAN_ADD_SHORT(canMsg,((v)&0xFF));     }
+
+#define CAN_ADD_FLOAT(canMsg,v)  {  \
+  uint8_t *samesies = (uint8_t*)&(v);  \
+  CAN_ADD_SHORT(canMsg,(samesies[3]));  \
+  CAN_ADD_SHORT(canMsg,(samesies[2]));  \
+  CAN_ADD_SHORT(canMsg,(samesies[1]));  \
+  CAN_ADD_SHORT(canMsg,(samesies[0]));  }
+
+#define CAN_GET_SHORT(canMsg,v)  canMsg.data[v++]
+
+#define CAN_GET_LONG(canMsg,v)   ((uint16_t)CAN_GET_SHORT(canMsg,v) << 8) | ((uint16_t)CAN_GET_SHORT(canMsg,v))
+
+inline float CAN_GET_FLOAT(CAN_msg_t &canMsg,uint8_t &v) {
+  uint32_t i =  (((uint32_t)CAN_GET_SHORT(canMsg,v) << 24) |  
+                 ((uint32_t)CAN_GET_SHORT(canMsg,v) << 16) |  
+                 ((uint32_t)CAN_GET_SHORT(canMsg,v) <<  8) |  
+                 ((uint32_t)CAN_GET_SHORT(canMsg,v)      ));
+  float r = *(float*)&i;
+  return r;
+}
+
+//-----------------------------------------------------------------------------
+class CANBus {
+  private:
+    /**
+    * Initializes the CAN GPIO registers.
+    *
+    * @params: addr    - Specified GPIO register address.
+    * @params: index   - Specified GPIO index.
+    * @params: speed   - Specified OSPEEDR register value.(Optional)
+    *
+    */
+    void setGpio(GPIO_TypeDef * addr, uint8_t index, uint8_t speed = 3);
+
+    // Calculation of bit timing dependent on peripheral clock rate
+    int16_t computeTimings(const uint32_t peripheral_clock_rate,
+                              const uint32_t target_bitrate,
+                              CAN_bit_timing_config_t* const out_timings);
+
+    // Print registers.
+    void printRegister(const char * buf, uint32_t reg);
+
+    /**
+    * Initializes the CAN filter registers.
+    *
+    * @preconditions   - This register can be written only when the filter initialization mode is set (FINIT=1) in the CAN_FMR register.
+    * @params: index   - Specified filter index. index 27:14 are available in connectivity line devices only.
+    * @params: scale   - Select filter scale.
+    *                    0: Dual 16-bit scale configuration
+    *                    1: Single 32-bit scale configuration
+    * @params: mode    - Select filter mode.
+    *                    0: Two 32-bit registers of filter bank x are in Identifier Mask mode
+    *                    1: Two 32-bit registers of filter bank x are in Identifier List mode
+    * @params: fifo    - Select filter assigned.
+    *                    0: Filter assigned to FIFO 0
+    *                    1: Filter assigned to FIFO 1
+    * @params: bank1   - Filter bank register 1
+    * @params: bank2   - Filter bank register 2
+    */
+    void setFilter(uint8_t index, uint8_t scale, uint8_t mode, uint8_t fifo, uint32_t bank1, uint32_t bank2);
+
+    /**
+    * Decodes CAN messages from the data registers and populates a 
+    * CAN message struct with the data fields.
+    * 
+    * @preconditions A valid CAN message is received
+    * @param ch channel 1 or 2
+    * @param CAN_rx_msg - CAN message structure for reception
+    */
+    void receive(uint8_t ch,CAN_msg_t* CAN_rx_msg);
+    
+    /**
+    * Encodes CAN messages using the CAN message struct and populates the 
+    * data registers with the sent.
+    * 
+    * @param ch channel 1 or 2
+    * @param CAN_tx_msg - CAN message structure for transmission
+    */
+    bool send(uint8_t ch,CAN_msg_t* CAN_tx_msg);
+
+    /**
+    * Returns whether there are CAN messages available.
+    *
+    * @param ch channel 1 or 2
+    * @returns If pending CAN messages are in the CAN controller
+    */
+    uint8_t available(uint8_t ch);
+
+
+  public:
+
+    uint8_t CANBusAddress;
+
+
+    /**
+    * Initializes the CAN controller with specified bit rate.
+    *
+    * @params: bitrate - Specified bitrate. If this value is not one of the defined constants, bit rate will be defaulted to 125KBS
+    * @params: remap   - Select CAN port. 
+    *                    =0:CAN_RX mapped to PA11, CAN_TX mapped to PA12
+    *                    =1:Not used
+    *                    =2:CAN_RX mapped to PB8, CAN_TX mapped to PB9 (not available on 36-pin package)
+    *                    =3:CAN_RX mapped to PD0, CAN_TX mapped to PD1 (available on 100-pin and 144-pin package)
+    */
+    bool init(BITRATE bitrate, int remap);
+
+    /**
+    * Decodes CAN messages from the data registers and populates a 
+    * CAN message struct with the data fields.
+    * 
+    * @preconditions A valid CAN message is received
+    * @param CAN_rx_msg - CAN message structure for reception
+    */
+    void receive(CAN_msg_t* CAN_rx_msg);
+    
+    /**
+    * Encodes CAN messages using the CAN message struct and populates the 
+    * data registers with the sent.
+    * 
+    * @param CAN_tx_msg - CAN message structure for transmission
+    */
+    bool send(CAN_msg_t* CAN_tx_msg);
+
+    /**
+    * @returns If pending CAN messages are in the CAN controller
+    */
+    uint8_t available();
+
+    void readAddress();
+    void setup();
+
+    void stepTest();
+    void readTest();
+    void writeTest();
+};
 
 //-----------------------------------------------------------------------------
 
-// Calculation of bit timing dependent on peripheral clock rate
-extern int16_t CANComputeTimings(const uint32_t peripheral_clock_rate,
-                          const uint32_t target_bitrate,
-                          CAN_bit_timing_config_t* const out_timings);
-
-// Print registers.
-extern void CANPrintRegister(const char * buf, uint32_t reg);
-
-/**
- * Initializes the CAN filter registers.
- *
- * @preconditions   - This register can be written only when the filter initialization mode is set (FINIT=1) in the CAN_FMR register.
- * @params: index   - Specified filter index. index 27:14 are available in connectivity line devices only.
- * @params: scale   - Select filter scale.
- *                    0: Dual 16-bit scale configuration
- *                    1: Single 32-bit scale configuration
- * @params: mode    - Select filter mode.
- *                    0: Two 32-bit registers of filter bank x are in Identifier Mask mode
- *                    1: Two 32-bit registers of filter bank x are in Identifier List mode
- * @params: fifo    - Select filter assigned.
- *                    0: Filter assigned to FIFO 0
- *                    1: Filter assigned to FIFO 1
- * @params: bank1   - Filter bank register 1
- * @params: bank2   - Filter bank register 2
- */
-extern void CANSetFilter(uint8_t index, uint8_t scale, uint8_t mode, uint8_t fifo, uint32_t bank1, uint32_t bank2);
-
-/**
- * Initializes the CAN controller with specified bit rate.
- *
- * @params: bitrate - Specified bitrate. If this value is not one of the defined constants, bit rate will be defaulted to 125KBS
- * @params: remap   - Select CAN port. 
- *                    =0:CAN_RX mapped to PA11, CAN_TX mapped to PA12
- *                    =1:Not used
- *                    =2:CAN_RX mapped to PB8, CAN_TX mapped to PB9 (not available on 36-pin package)
- *                    =3:CAN_RX mapped to PD0, CAN_TX mapped to PD1 (available on 100-pin and 144-pin package)
- */
-extern bool CANInit(BITRATE bitrate, int remap);
-
-
-/**
- * Decodes CAN messages from the data registers and populates a 
- * CAN message struct with the data fields.
- * 
- * @preconditions A valid CAN message is received
- * @params CAN_rx_msg - CAN message structure for reception
- */
-extern void CANReceive(CAN_msg_t* CAN_rx_msg);
- 
-/**
- * Encodes CAN messages using the CAN message struct and populates the 
- * data registers with the sent.
- * 
- * @params CAN_tx_msg - CAN message structure for transmission
- * 
- */
-extern bool CANSend(CAN_msg_t* CAN_tx_msg);
-
-/**
- * Returns whether there are CAN messages available.
- *
- * @returns If pending CAN messages are in the CAN controller
- *
- */
-extern uint8_t CANMsgAvail(void);
-
-
-extern void CANsetup();
-extern void CANstep();
+extern CANBus CANbus;

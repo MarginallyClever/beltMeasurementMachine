@@ -1,87 +1,131 @@
 #include "config.h"
 #include "CANOpen.h"
+//-----------------------------------------------------------------------------
+// https://www.ni.com/en-ca/shop/seamlessly-connect-to-third-party-devices-and-supervisory-system/the-basics-of-canopen.html
+//-----------------------------------------------------------------------------
 
-class CANOpen {
-  static uint8_t state;
-  static uint16_t functionCode;
-  static uint8_t nodeAddress;
+CANOpen CANopen;
 
-  static void setup() {
-    state = STATE_BOOT;
-  }
+//-----------------------------------------------------------------------------
 
-  static void parseCAN(CAN_msg_t *msg) {
-    parseFunctionCodeAndNodeAddress(msg);
-    switch(functionCode) {
-    case CANOPEN_NMT:       parseNMT(msg);        break;
-    //case CANOPEN_HEARTBEAT: parseHEARTBEAT(msg);  break;    // servos do not receive heartbeat.
-    //case CANOPEN_SYNC:      parseSYNC(msg);       break;
-    case CANOPEN_TIMESTAMP: parseTIMESTAMP(msg);  break;
-    case CANOPEN_EMCY:      parseEMCY(msg);       break;
-    //case CANOPEN_SDO:       parseSDO(msg);        break;
-    default: break;
+CANOpen::CANOpen() {
+  operationalState = OperationalState::RESET_NODE;
+}
+
+void CANOpen::begin() {
+  operationalState = OperationalState::RESET_COMMUNICATION;
+
+  // Initialize the CAN bus with the desired baud rate
+  CANbus.setup();
+
+  operationalState = OperationalState::INITIALIZATION;
+
+  lastHeartbeatTime = millis();
+  CANopen.sendHeartbeatMessage(CANbus.CANBusAddress, operationalState);
+
+  operationalState = OperationalState::PRE_OPERATIONAL;
+}
+
+bool CANOpen::send(CANOpen_msg_t *msg) {
+    _convertCANOpenToCAN(msg, &_canMsg);
+    return CANbus.send(&_canMsg);
+}
+
+void CANOpen::receive() {
+    CANOpen_msg_t _canOpenMsg;
+
+    CANbus.receive(&_canMsg);
+    _convertCANToCANOpen(&_canMsg, &_canOpenMsg);
+    if (_canOpenMsg.COB_ID == 0x0000) {
+      handleNMTMessage(&_canOpenMsg);
+    } else if(_canOpenMsg.COB_ID == HEARTBEAT_CONSUMER_BASE_COB_ID) {
+      handleHeartbeatMessage(&_canOpenMsg);
     }
-  }
+}
 
-  static void parseFunctionCodeAndNodeAddress(CAN_msg_t *msg) {
-    uint16_t id = msg->id;
-    functionCode = (id & 0b11110000000);
-    nodeAddress  = (id & 0b00001111111);
-  }
+void CANOpen::_convertCANOpenToCAN(CANOpen_msg_t *openMsg, CAN_msg_t *canMsg) {
+    canMsg->id = openMsg->COB_ID;
+    canMsg->type = openMsg->RTR;
+    canMsg->len = openMsg->length;
+    memcpy(canMsg->data, openMsg->data, openMsg->length);
+}
 
-  static bool thisMessageIsForMe() {
-    return nodeAddress == CANBusAddress;
-  }
+void CANOpen::_convertCANToCANOpen(CAN_msg_t *canMsg, CANOpen_msg_t *openMsg) {
+    openMsg->COB_ID = canMsg->id;
+    openMsg->RTR = canMsg->type;
+    openMsg->length = canMsg->len;
+    memcpy(openMsg->data, canMsg->data, canMsg->len);
+}
 
+void CANOpen::sendNMTMessage(NMT_Command command, uint8_t nodeID) {
+    CANOpen_msg_t nmtMsg;
+    nmtMsg.COB_ID = 0x0000; // NMT COB-ID
+    nmtMsg.RTR = 0;
+    nmtMsg.length = 2;
+    nmtMsg.data[0] = command;
+    nmtMsg.data[1] = nodeID;
 
-  static void parseNMT(CAN_msg_t *msg) {
-    if(!(state & 0x80)) return;
-    if(msg->len!=2) return;
+    send(&nmtMsg);
+}
 
-    switch(msg->data[0]) {
-      case NMT_OPERATIONAL:
-        // TODO
+void CANOpen::handleNMTMessage(CANOpen_msg_t *msg) {
+    NMT_Command command = static_cast<NMT_Command>(msg->data[0]);
+    uint8_t nodeID = msg->data[1];
+    if(nodeID != CANbus.CANBusAddress) return;
+
+    // Take appropriate action based on the NMT command received
+    switch (command) {
+      case NMT_START_REMOTE_NODE:
+        // Start the node with the given node ID
+        operationalState = OperationalState::OPERATIONAL;
         break;
-      case NMT_STOPPED:
-        // TODO
+      case NMT_STOP_REMOTE_NODE:
+        // Stop the node with the given node ID
+        operationalState = OperationalState::STOPPED;
         break;
-      case NMT_PREOPERATIONAL:
-        // TODO
+      case NMT_ENTER_PREOPERATIONAL:
+        // Set the node to the pre-operational state
+        operationalState = OperationalState::PRE_OPERATIONAL;
         break;
-      case NMT_RESETNODE:
-        // TODO
+      case NMT_RESET_NODE:
+        // Reset the node
+        //pinMode(PIN_NRST,OUTPUT);
+        //digitalWrite(PIN_NRST,HIGH);
+        //digitalWrite(PIN_NRST,LOW);
         break;
-      case NMT_RESETCOMMUNICATION:
-        // TODO
+      case NMT_RESET_COMMUNICATION:
+        // Reset the communication for the node
+        this->begin();
+        break;
+      default:
+        // Handle unknown commands if necessary
         break;
     }
+}
+
+void CANOpen::sendHeartbeatMessage(uint8_t nodeID, uint8_t state) {
+    CANOpen_msg_t hbMsg;
+    hbMsg.COB_ID = HEARTBEAT_PRODUCER_BASE_COB_ID + nodeID; // Heartbeat producer COB-ID
+    hbMsg.RTR = 0;
+    hbMsg.length = 1;
+    hbMsg.data[0] = state;
+
+    send(&hbMsg);
+}
+
+void CANOpen::handleHeartbeatMessage(CANOpen_msg_t *msg) {
+    uint8_t nodeID = msg->COB_ID & 0x7F;
+    uint8_t state = msg->data[0];
+
+    // Take appropriate action based on the received Heartbeat message
+    // For example, you could update the node's state in a data structure or trigger an event
+}  
+
+void CANOpen::updateHeartbeat() {
+  uint32_t currentTime = millis();
+  // Check if it's time to send a Heartbeat message
+  if (currentTime - lastHeartbeatTime >= HEARTBEAT_INTERVAL_MS) {
+      this->sendHeartbeatMessage(CANbus.CANBusAddress, operationalState);
+      lastHeartbeatTime = currentTime;
   }
-
-
-  static uint16_t generateID(uint16_t functionID,uint16_t nodeID) {
-    return functionID | nodeID;
-  }
-
-
-  static void generateHEARTBEAT(CAN_msg_t *msg) {
-    msg->id = generateID(CANOPEN_HEARTBEAT,CANBusAddress);
-    msg->len = 1;
-    msg->data[0] = 0;
-  }
-
-
-  static void parseSYNC(CAN_msg_t *msg) {
-  }
-
-
-  static void parseTIMESTAMP(CAN_msg_t *msg) {
-  }
-
-
-  static void parseEMCY(CAN_msg_t *msg) {
-  }
-
-
-  static void parseSDO(CAN_msg_t *msg) {
-  }
-};
+}
